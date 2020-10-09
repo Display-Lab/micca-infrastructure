@@ -1,0 +1,18 @@
+[
+  {
+    "ParameterKey": "ImageId",
+    "ParameterValue": "ami-028682ebf96de01e1"
+  },
+  {
+    "ParameterKey": "SSHLocationIPv6",
+    "ParameterValue": "your:ipv6:addr:ess/128"
+  },
+  {
+    "ParameterKey": "S3DataBucketName",
+    "ParameterValue": "your-data-bucket"
+  },
+  {
+    "ParameterKey": "KeyName",
+    "ParameterValue": "your-ssh-key"
+  }
+]

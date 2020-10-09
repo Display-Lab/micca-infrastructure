@@ -1,0 +1,9 @@
+[
+  {
+    "ResourceType":"AWS::S3::Bucket",
+    "LogicalResourceId":"MyPersistingBucket",
+    "ResourceIdentifier":{
+      "BucketName":"cag-importable"
+    }
+  }
+]

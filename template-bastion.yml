@@ -1,0 +1,49 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Metadata: 
+  License: Apache-2.0
+Description: 'Bastion host to attach to existing vpc.  
+  Permits connection to internal resources.'
+Parameters:
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the web server
+    Type: AWS::EC2::KeyPair::KeyName
+    ConstraintDescription: must be the name of an existing EC2 KeyPair.
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+
+Resources:
+  BastionHost:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.small
+      SecurityGroupIds: 
+        - !ImportValue MiccaBastSecGroup
+      KeyName: !Ref KeyName
+      SubnetId: !ImportValue MiccaPubSubnet
+      Ipv6AddressCount: 1
+      ImageId: !Ref LatestAmiId
+
+  #############################
+  # Lookup EC2 IPv6 Addresses #
+  #############################
+  
+  # Custom Resource to lookup bastion ipv6 using parent stack's lambda
+  BastionHostInfo:
+    Type: Custom::Ec2Ipv6
+    Properties:
+      ServiceToken: !GetAtt GetEc2Ipv6Addresses.Arn
+      ServiceToken: !ImportValue MiccaIpv6Lookup
+      Ec2Id: !Ref BastionHost
+
+Outputs:
+  BastionIP:
+    Value: !GetAtt BastionHost.PublicIp
+    Description: Publicly addressable IP of bastion host
+  BastionDnsName:
+    Value: !GetAtt BastionHost.PublicDnsName
+    Description: Publicly addressable domain of bastion host
+  BastionIPv6:
+    Value: !GetAtt BastionHostInfo.Ipv6Addresses
+    Description: IPv6 addresses of bastion host

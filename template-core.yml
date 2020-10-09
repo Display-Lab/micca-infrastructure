@@ -1,0 +1,469 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Metadata: 
+  License: Apache-2.0
+Description: 'Report generation EC2 instance. Uses EBS backed drives to allow shutdown without losing the stored data.'
+Parameters:
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the web server
+    Type: AWS::EC2::KeyPair::KeyName
+    ConstraintDescription: must be the name of an existing EC2 KeyPair.
+  InstanceType:
+    Description: EC2 instance type
+    Type: String
+    Default: c5.large
+  SSHLocationIPv6:
+    Description: Lockdown SSH access to ipv6 CIDR 
+    Type: String
+  ImageId:
+    Description: Amazon image identifier
+    Type: String
+    Default: ami-028682ebf96de01e1
+  VpcCIDR:
+    Description: Please enter the IP range (CIDR notation) for this VPC
+    Type: String
+    Default: 10.192.0.0/16
+  PrvSubnetCIDR:
+    Description: Please enter the IP range (CIDR notation) for the private subnet in the first Availability Zone
+    Type: String
+    Default: 10.192.10.0/24
+  PubSubnetCIDR:
+    Description: Please enter the IP range (CIDR notation) for the public subnet in the first Availability Zone
+    Type: String
+    Default: 10.192.11.0/24
+  S3DataBucketName:
+    Description: Bucket for holding the data and reports
+    Type: String
+
+Resources:
+  ####################
+  # VPC & Networking #
+  ####################
+  
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: project
+          Value: micca
+        - Key: name
+          Value: micca-reports
+
+  VPCCidrBlock:
+    Type: 'AWS::EC2::VPCCidrBlock'
+    Properties:
+      AmazonProvidedIpv6CidrBlock: true
+      VpcId: !Ref VPC
+
+  PrvSubnet:
+    Type: AWS::EC2::Subnet
+    DependsOn: VPCCidrBlock
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: !Ref PrvSubnetCIDR
+      Ipv6CidrBlock: !Select [0, !Cidr [!Select [0, !GetAtt 'VPC.Ipv6CidrBlocks'], 4, 64]]
+      MapPublicIpOnLaunch: false
+
+  PubSubnet:
+    Type: AWS::EC2::Subnet
+    DependsOn: VPCCidrBlock
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: !Ref PubSubnetCIDR
+      Ipv6CidrBlock: !Select [1, !Cidr [!Select [0, !GetAtt 'VPC.Ipv6CidrBlocks'], 4, 64]]
+      MapPublicIpOnLaunch: true
+
+  EgressOnlyInternetGateway:
+    Type: 'AWS::EC2::EgressOnlyInternetGateway'
+    Properties:
+      VpcId: !Ref VPC
+
+  InternetGateway:
+    Type: 'AWS::EC2::InternetGateway'
+    Properties:
+      Tags:
+      - Key: Name
+        Value: !Sub '10.192.0.0/16'
+
+  VPCGatewayAttachment:
+    Type: 'AWS::EC2::VPCGatewayAttachment'
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  EgressOnlyInternetGateway:
+    Type: 'AWS::EC2::EgressOnlyInternetGateway'
+    Properties:
+      VpcId: !Ref VPC
+
+  RouteTablePublic:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: 'A Public'
+
+  RouteTableAssociationAPublic:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref PubSubnet
+      RouteTableId: !Ref RouteTablePublic
+
+  RouteTablePrivate: 
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: 'A Private'
+
+  RouteTableAssociationPrivate:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref PrvSubnet
+      RouteTableId: !Ref RouteTablePrivate
+
+  RouteTablePublicInternetRoute: 
+    Type: 'AWS::EC2::Route'
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref RouteTablePublic
+      DestinationCidrBlock: '0.0.0.0/0'
+      GatewayId: !Ref InternetGateway
+
+  RouteTablePublicInternetRouteIPv6:
+    Type: 'AWS::EC2::Route'
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref RouteTablePublic
+      DestinationIpv6CidrBlock: '::/0'
+      GatewayId: !Ref InternetGateway
+
+  RouteTablePrivateAInternetRouteIPv6:
+    Type: 'AWS::EC2::Route'
+    Properties:
+      RouteTableId: !Ref RouteTablePrivate
+      DestinationIpv6CidrBlock: '::/0'
+      EgressOnlyInternetGatewayId: !Ref EgressOnlyInternetGateway
+
+  NetworkAclPublic:
+    Type: 'AWS::EC2::NetworkAcl'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: Public
+
+  NetworkAclPrivate:
+    Type: 'AWS::EC2::NetworkAcl'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: Private
+
+  SubnetNetworkAclAssociationAPublic:
+    Type: 'AWS::EC2::SubnetNetworkAclAssociation'
+    Properties:
+      SubnetId: !Ref PubSubnet
+      NetworkAclId: !Ref NetworkAclPublic
+
+  SubnetNetworkAclAssociationAPrivate:
+    Type: 'AWS::EC2::SubnetNetworkAclAssociation'
+    Properties:
+      SubnetId: !Ref PrvSubnet
+      NetworkAclId: !Ref NetworkAclPrivate
+
+  NetworkAclEntryInPublicAllowAll:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      NetworkAclId: !Ref NetworkAclPublic
+      RuleNumber: 99
+      Protocol: -1
+      RuleAction: allow
+      Egress: false
+      CidrBlock: '0.0.0.0/0'
+
+  NetworkAclEntryInPublicAllowAllIPv6:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      NetworkAclId: !Ref NetworkAclPublic
+      RuleNumber: 98
+      Protocol: -1
+      RuleAction: allow
+      Egress: false
+      Ipv6CidrBlock: '::/0'
+
+  NetworkAclEntryOutPublicAllowAll:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      NetworkAclId: !Ref NetworkAclPublic
+      RuleNumber: 99
+      Protocol: -1
+      RuleAction: allow
+      Egress: true
+      CidrBlock: '0.0.0.0/0'
+
+  NetworkAclEntryOutPublicAllowAllIPv6:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      NetworkAclId: !Ref NetworkAclPublic
+      RuleNumber: 98
+      Protocol: -1
+      RuleAction: allow
+      Egress: true
+      Ipv6CidrBlock: '::/0'
+
+  NetworkAclEntryInPrivateAllowAll:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      NetworkAclId: !Ref NetworkAclPrivate
+      RuleNumber: 99
+      Protocol: -1
+      RuleAction: allow
+      Egress: false
+      CidrBlock: '0.0.0.0/0'
+
+  NetworkAclEntryInPrivateAllowAllIPv6:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      NetworkAclId: !Ref NetworkAclPrivate
+      RuleNumber: 98
+      Protocol: -1
+      RuleAction: allow
+      Egress: false
+      Ipv6CidrBlock: '::/0'
+
+  NetworkAclEntryOutPrivateAllowAll:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      NetworkAclId: !Ref NetworkAclPrivate
+      RuleNumber: 99
+      Protocol: -1
+      RuleAction: allow
+      Egress: true
+      CidrBlock: '0.0.0.0/0'
+
+  NetworkAclEntryOutPrivateAllowAllIPv6:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      NetworkAclId: !Ref NetworkAclPrivate
+      RuleNumber: 98
+      Protocol: -1
+      RuleAction: allow
+      Egress: true
+      Ipv6CidrBlock: '::/0'
+
+
+  ##############
+  # IAM Access #
+  ##############
+  
+  CrudRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: "sts:AssumeRole"
+            Principal:
+              Service: ec2.amazonaws.com
+            Effect: Allow
+            Sid: ""
+      Policies:
+        - PolicyName: S3CrudPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              Effect: Allow
+              Action: 
+                - s3:GetObject
+                - s3:ListBucket
+                - s3:GetBucketLocation
+                - s3:GetObjectVersion
+                - s3:PutObject
+                - s3:PutObjectAcl
+                - s3:GetLifecycleConfiguration
+                - s3:PutLifecycleConfiguration
+                - s3:DeleteObject
+              Resource: 
+                - Fn::Sub: 
+                    - "arn:${AWS::Partition}:s3:::${bucketName}/*"
+                    - bucketName: !Ref S3DataBucketName
+
+  CrudInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref CrudRole
+
+  #################
+  # EC2 Instances #
+  #################
+
+  BastionSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SSH access
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: '22'
+        ToPort: '22'
+        CidrIpv6: !Ref SSHLocationIPv6
+
+  InternalSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SSH access
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: '22'
+        ToPort: '22'
+        SourceSecurityGroupId: !GetAtt BastionSecurityGroup.GroupId
+
+  ReportHost:
+    Type: AWS::EC2::Instance
+    Properties:
+      IamInstanceProfile: !Ref CrudInstanceProfile
+      InstanceType: !Ref InstanceType
+      SecurityGroupIds: 
+        - !Ref InternalSecurityGroup
+      KeyName: !Ref KeyName
+      SubnetId: !Ref PrvSubnet
+      Ipv6AddressCount: 1
+      ImageId: !Ref ImageId
+      BlockDeviceMappings:
+        - DeviceName: "/dev/sda1"
+          Ebs:
+            VolumeSize: 10
+            VolumeType: gp2
+
+  #############################
+  # Lookup EC2 IPv6 Addresses #
+  #############################
+  
+  # Role to permit lambda to look up ec2 instance
+  DescribeEc2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: ec2infoLookup
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: arn:aws:logs:*:*:*
+          - Effect: Allow
+            Action:
+              - ec2:DescribeInstances
+            Resource: "*"
+            # Note: The Amazon EC2 ec2:Describe* API actions do not support resource-level permissions
+  
+  # Lambda used to get EC2 IPv6 Address
+  GetEc2Ipv6Addresses: 
+    Type: AWS::Lambda::Function
+    Properties: 
+      Description: Look up IPv6 addresses of EC2 instance. 
+      Handler: index.handler
+      MemorySize: 128
+      Role: !GetAtt DescribeEc2Role.Arn
+      Runtime: "python3.7"
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import cfnresponse
+          import logging
+          
+          def handler(event, context):
+            logger = logging.getLogger()
+            logger.setLevel(logging.INFO)
+            
+            # initialize our responses, assume failure by default
+            response_data = {}
+            response_status = cfnresponse.FAILED
+            
+            logger.info('Received event: {}'.format(json.dumps(event)))
+            
+            if event['RequestType'] == 'Delete':
+              response_status = cfnresponse.SUCCESS
+              cfnresponse.send(event, context, response_status, response_data)
+              return None
+
+            try:
+              ec2 = boto3.resource('ec2')
+            except Exception as e:
+              logger.info('boto3.resource failure: {}'.format(e)) # appease yaml highlighting'
+              cfnresponse.send(event, context, response_status, response_data)
+              return None
+            
+            ec2_id = event['ResourceProperties']['Ec2Id']
+
+            try:
+              instance = ec2.Instance(ec2_id)
+              nics = instance.network_interfaces_attribute
+              addresses = []
+
+              for nic in nics:
+                  ipv6addresses = nic['Ipv6Addresses']
+                  for ipv6 in ipv6addresses:
+                      addresses.append(ipv6['Ipv6Address'])
+
+            except Exception as e:
+              logger.info('ec2.describe_instance failure: {}'.format(e)) # appease yaml highlighting'
+              cfnresponse.send(event, context, response_status, response_data)
+              return None
+
+            response_data['Ipv6Addresses'] = ",".join(addresses)
+            response_status = cfnresponse.SUCCESS
+            cfnresponse.send(event, context, response_status, response_data, noEcho=True)
+
+  # Custom Resource to lookup bastion ipv6
+  ReportHostInfo:
+    Type: Custom::Ec2Ipv6
+    Properties:
+      ServiceToken: !GetAtt GetEc2Ipv6Addresses.Arn
+      Ec2Id: !Ref ReportHost
+
+Outputs:
+  ReportIPv6:
+    Value: !GetAtt ReportHostInfo.Ipv6Addresses
+    Description: IPv6 addresses of report host
+  MiccaPubSubnet:
+    Value: !Ref PubSubnet
+    Description: Id of public subnet bastion can be launched into.
+    Export:
+      Name: MiccaPubSubnet
+  BastionSecGroup:
+    Value: !GetAtt BastionSecurityGroup.GroupId
+    Description: Id of bastion security group
+    Export:
+      Name: MiccaBastSecGroup
+  Ipv6Lookup:
+    Value: !GetAtt GetEc2Ipv6Addresses.Arn
+    Description: Arn of lambda function for looking up EC2 IPv6 Addresses
+    Export:
+      Name: MiccaIpv6Lookup
